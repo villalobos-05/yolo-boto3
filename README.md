@@ -21,6 +21,8 @@ Set the following environment variables:
 - `TARGET_CLASSES`: Name of the target object classes (default: `clothing,coat,shirt`).
 - `DISALLOWED_CLASSES`: Comma-separated list of disallowed class names (default: `person,animal`).
 - `MIN_CONFIDENCE`: Minimum confidence threshold (default: `0.5`).
+- `JWT_SECRET`: Jwt secret key for validating the request.
+- `ALGORITHM`: Algorithm used for signing the jwt.
 
 ## Installation
 

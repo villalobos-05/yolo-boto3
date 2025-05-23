@@ -1,11 +1,14 @@
+import uuid
 from dotenv import load_dotenv
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel
 
 load_dotenv(override=True)
 
 import os
 import logging
 from typing import List, Dict, Any
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from ultralytics import YOLO
@@ -14,20 +17,11 @@ from botocore.exceptions import BotoCoreError, ClientError
 from botocore.client import Config
 import io
 from PIL import Image
+from jose import JWTError, jwt
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Load environment variables
-R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY")
-R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
-R2_BUCKET = os.getenv("R2_BUCKET_NAME")
-YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt")
-DISALLOWED_CLASSES = set(os.getenv("DISALLOWED_CLASSES", "person,animal").split(","))
-TARGET_CLASSES = set(os.getenv("TARGET_CLASSES", "clothing,shirt,coat").split(","))
-MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", 0.5))
-
 
 app = FastAPI()
 
@@ -41,6 +35,93 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Configuration ---
+JWT_SECRET = os.getenv("JWT_SECRET")
+ALGORITHM = os.getenv("ALGORITHM")
+
+
+# --- Pydantic Models (Optional, but good for defining token payload structure) ---
+class TokenPayload(BaseModel):
+    sub: str | int = None
+
+
+# --- OAuth2PasswordBearer for header extraction and OpenAPI documentation ---
+# We are not using it for password flow, only to define how the token is expected.
+# tokenUrl is a dummy value here as we are not implementing token generation.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+# --- JWT Validation Dependency ---
+async def validate_token(token: str = Depends(oauth2_scheme)) -> TokenPayload:
+    """
+    Validates the JWT token.
+    - Decodes the token using the JET_SECRET_KEY and ALGORITHM.
+    - Checks for expiration and other JWT errors.
+    - Returns the token payload if valid.
+    - Raises HTTPException for various error scenarios.
+    """
+
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    malformed_token_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Malformed token or invalid Bearer scheme",
+        headers={"WWW-Authenticate": 'Bearer error="invalid_request"'},
+    )
+    expired_token_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Token has expired",
+        headers={
+            "WWW-Authenticate": 'Bearer error="invalid_token", error_description="The token has expired"'
+        },
+    )
+    invalid_signature_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid token signature",
+        headers={
+            "WWW-Authenticate": 'Bearer error="invalid_token", error_description="The token signature is invalid"'
+        },
+    )
+
+    # The `token: str = Depends(oauth2_scheme)` already handles:
+    # 1. Checking if the Authorization header exists.
+    # 2. Checking if it's a Bearer token.
+    # 3. Returning the token string itself.
+    # If the header is missing or not "Bearer", FastAPI will return a 401 error automatically
+    # before this function is even called, thanks to OAuth2PasswordBearer.
+
+    try:
+        # Decode the JWT token
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        print(payload)  # -> IT DOESN'T PRINT THIS
+        # Optionally, validate the payload structure if you have a Pydantic model
+
+    except jwt.ExpiredSignatureError:
+        # Token has expired
+        raise expired_token_exception
+    except jwt.JWTClaimsError:
+        # Any other claims-related error (e.g., nbf, iat invalid)
+        raise malformed_token_exception
+    except JWTError:
+        # General JWT error (e.g., invalid signature, malformed token)
+        # This can catch various issues, including signature mismatch.
+        raise invalid_signature_exception  # More specific than credentials_exception for signature issues
+
+    # If everything is fine, return the validated token data
+    return payload
+
+
+# Load environment variables
+R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY")
+R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
+R2_BUCKET = os.getenv("R2_BUCKET_NAME")
+YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt")
+DISALLOWED_CLASSES = set(os.getenv("DISALLOWED_CLASSES", "person,animal").split(","))
+TARGET_CLASSES = set(os.getenv("TARGET_CLASSES", "clothing,shirt,coat").split(","))
+MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", 0.5))
 
 model = None  # type: YOLO
 s3_client = None  # type: boto3.client
@@ -129,9 +210,13 @@ def validate_detections(detections: List[Dict[str, Any]], filename: str) -> None
         )
 
 
-@app.post("/upload-images")
+@app.post(
+    "/upload-images",
+)
 async def validate_and_upload(
-    files: List[UploadFile] = File(...), s3: boto3.client = Depends(get_s3_client)
+    files: List[UploadFile] = File(...),
+    s3: boto3.client = Depends(get_s3_client),
+    user: TokenPayload = Depends(validate_token),
 ):
     """Endpoint to validate images and upload to Cloudflare R2."""
     uploaded = []
@@ -178,7 +263,7 @@ async def validate_and_upload(
             buffer.seek(0)
 
             # Upload to R2
-            key = f"uploads/{file.filename}"
+            key = f"uploads/{user["sub"]}/{uuid.uuid4()}"
             try:
                 s3.upload_fileobj(
                     Fileobj=buffer,

@@ -1,3 +1,4 @@
 fastapi[standard]
 ultralytics
 boto3
+python-jose[cryptography]
