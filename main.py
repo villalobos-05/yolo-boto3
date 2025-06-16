@@ -248,7 +248,10 @@ async def validate_and_upload(
                 )
 
             # Run inference
+            logger.info(f"Starting YOLO prediction in file: [{file.filename}], with image size: {img.size}")
             results = model.predict(source=img, imgsz=640)
+            logger.info(f"YOLO prediction ended. Detections count: {len(results[0].boxes)}")
+
             detections = []
             for r in results:
                 for *box, conf, cls in r.boxes.data.tolist():
